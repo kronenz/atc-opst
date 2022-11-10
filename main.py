@@ -26,10 +26,11 @@ class HelloWorld(Resource):
         + 항목 1 
             - 소항목 2
         '''
-        conn = openstack.connect(cloud='atc')
-        for server in conn.compute.servers():
-            pp.pprint(server.to_dict())
-    
+        conn = openstack.connect(cloud='admin')
+        # project_name = vm-autoscaling
+        for server in conn.compute.servers(project_id='925aba3de85a48ccb284bf02edc1c18e'):
+            pp.pprint(server.to_dict()['name'])
+
         return {"hello": "world!"}
 
 
