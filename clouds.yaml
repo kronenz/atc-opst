@@ -1,0 +1,10 @@
+clouds:
+  atc:
+    auth:
+      username: admin
+      password: 1234qwer
+      domain_name: Default
+      project_name: vm-autoscaling
+      project_id: 925aba3de85a48ccb284bf02edc1c18e
+      auth_url: http://192.168.15.40:5000/v3/
+
