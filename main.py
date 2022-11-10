@@ -6,7 +6,13 @@ from flask import Flask, request  # 서버 구현을 위한 Flask 객체 import
 from flask_restx import Api, Resource  # Api 구현을 위한 Api 객체 import
 from flask_cors import CORS, cross_origin
 
+import openstack as openstack
+openstack.enable_logging(debug=True)
+
+import pprint
 ##Flask Setup
+
+pp=pprint.PrettyPrinter()
 
 app = Flask(__name__)  # Flask 객체 선언, 파라미터로 어플리케이션 패키지의 이름을 넣어줌.
 CORS(app)
@@ -20,6 +26,10 @@ class HelloWorld(Resource):
         + 항목 1 
             - 소항목 2
         '''
+        conn = openstack.connect(cloud='atc')
+        for server in conn.compute.servers():
+            pp.pprint(server.to_dict())
+    
         return {"hello": "world!"}
 
 
