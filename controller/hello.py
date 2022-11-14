@@ -1,5 +1,4 @@
 from flask_restx import Resource, Namespace  # Api 구현을 위한 Api 객체 import
-from flask import Blueprint
 import openstack as openstack
 import pprint
 
