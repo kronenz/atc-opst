@@ -1,5 +1,5 @@
+from flask import current_app
 from flask_restx import Resource, Namespace  # Api 구현을 위한 Api 객체 import
-import openstack as openstack
 import pprint
 
 pp = pprint.PrettyPrinter()
@@ -15,7 +15,9 @@ class HelloWorld(Resource):
         + 항목 1
             - 소항목 2
         '''
-        conn = openstack.connect(cloud='admin')
+
+        conn = current_app.sdk_connection
+
         # project_name = vm-autoscaling
         for server in conn.compute.servers(project_id='925aba3de85a48ccb284bf02edc1c18e'):
             pp.pprint(server.to_dict()['name'])
