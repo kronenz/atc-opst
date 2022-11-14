@@ -6,6 +6,7 @@ import openstack as openstack
 # openstack.enable_logging(debug=True)
 openstack.enable_logging()
 
+
 def create_app():
     app = Flask(__name__)
 
@@ -19,9 +20,14 @@ def create_app():
 
     api.add_namespace(hello, '/')
 
-
     from controller.autoscaling import namespace as autoscaling
 
     api.add_namespace(autoscaling, '/api')
+
+    from controller.metric import vm
+    app.register_blueprint(vm.bp)
+
+    from controller.metric import host
+    app.register_blueprint(host.bp)
 
     return app
