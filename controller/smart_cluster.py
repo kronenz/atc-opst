@@ -1,5 +1,5 @@
 import pprint
-
+import requests
 from flask import request  # 서버 구현을 위한 Flask 객체 import
 from flask import current_app, g
 from flask_restx import Namespace, Resource, fields, marshal, marshal_with  # Api 구현을 위한 Api 객체 import
@@ -22,7 +22,6 @@ model_cluster_profile = namespace.model('Cluster_cluster_profile', {
         # 'server_group': fields.String(description=""), # 새로 생성
         'security_group': fields.String(description="프로파일 Security Group's Name", required=True)
     })
-
 
 model_cluster_info = namespace.model('Cluster_cluster', {
         'min_size': fields.Integer(description='클러스터 최소 노드 개수', default=1),
@@ -86,8 +85,25 @@ model_cluster = namespace.model('Cluster', {
     'loadbalancer': fields.Nested(model_lb, required=True)
 })
 
-model_as = namespace.model('AutoScalingPolicy', {
+model_asp_scaling = namespace.model('AutoScalingPolicy_Scaling_In', {
+    'type': fields.String(description='number 유형', requried=True, default='CHANGE_IN_CAPACITY',
+                          example='[EXACT_CAPACITY, CHANGE_IN_CAPACITY, CHANGE_IN_PERCENTAGE]'),
+    'number': fields.Integer(description='Scaling 크기', default=1),
+    'min_step': fields.Integer(description='최소 Scaling 크기', min_step=1),
+    'cooldown': fields.Integer(description='Cooldown 시간', default=60),
+    'metric': fields.String(description='메트릭', required=True),
+    'aggregation_method': fields.String(description='집계 함수', required=True),
+    'threshold': fields.Float(description='임계치', required=True),
+    'comparison_op': fields.String(description='임계치 비교연산자', required=True,
+                                   example="['lt', 'le', 'eq', 'ne', 'ge', 'gt']"),
+    'evaluation_period': fields.Integer(description='평가횟수',  default=1),
+    'repeat': fields.Boolean(description='반복여부', default=True)
+})
 
+model_asp = namespace.model('AutoScalingPolicy', {
+    'id': fields.String(description="클러스터 식별자", required=True),
+    'scaling_in': fields.Nested(model_asp_scaling, required=True),
+    'scaling_out': fields.Nested(model_asp_scaling, required=True)
 })
 
 
@@ -107,11 +123,11 @@ class CreateCluster(Resource):
         data_lb_sp = data_lb['session_persistence']
         conn_admin = current_app.sdk_connection
 
+        floating_ip = None
         lb = None
         server_group = None
         cluster = None
         policy_lb = None
-        floating_ip = None
 
         # TODO: 사용자별 username, password 선택도 가능해야 함.
         with openstack.connect(
@@ -126,6 +142,7 @@ class CreateCluster(Resource):
             try:
                 cluster_name = req_data['name']
 
+                # 로드밸런서 생성
                 lb = conn.load_balancer.create_load_balancer(
                     name='%s_lb' % cluster_name,
                     vip_network_id=req_data['network_id']
@@ -133,6 +150,15 @@ class CreateCluster(Resource):
 
                 conn.load_balancer.wait_for_load_balancer(lb.id)
 
+                # Floating IP 생성 후 로드밸런서 vip_port와 연결
+                floating_ip = conn_admin.network.create_ip(
+                    project_id=req_data['project_id'],
+                    port_id=lb.vip_port_id,
+                    floating_network_id=data_lb['provider_network_id'],
+                    floating_ip_address=data_lb.get('provider_network_ip')
+                )
+
+                # 로드밸런서 > 리스너 생성
                 lb_listener = conn.load_balancer.create_listener(
                     name='%s_listener' % cluster_name,
                     protocol=data_lb['protocol'],
@@ -143,6 +169,8 @@ class CreateCluster(Resource):
 
                 conn.load_balancer.wait_for_load_balancer(lb.id)
 
+
+                # 로드밸런서 > 리스너 > 풀 생성
                 lb_pool = conn.load_balancer.create_pool(
                     name='%s_pool' % cluster_name,
                     protocol=data_lb['protocol'],
@@ -153,6 +181,7 @@ class CreateCluster(Resource):
 
                 conn.load_balancer.wait_for_load_balancer(lb.id)
 
+                # 로드밸런서 > 리스너 > 풀 > 헬스모니터 생성
                 conn.load_balancer.create_health_monitor(
                     name='%s_hm' % cluster_name,
                     type=data_lb_hm['type'],
@@ -166,11 +195,13 @@ class CreateCluster(Resource):
                     pool_id=lb_pool.id
                 )
 
+                # 서버 그룹 생성
                 server_group = conn.compute.create_server_group(
                     name='%s_sg' % cluster_name,
                     policy='soft-anti-affinity'
                 )
 
+                # 클러스터 > 프로파일 생성
                 profile = conn.clustering.create_profile(
                     name='%s_profile' % cluster_name,
                     spec={
@@ -194,6 +225,7 @@ class CreateCluster(Resource):
                     }
                 )
 
+                # 클러스터 생성
                 cluster = conn.clustering.create_cluster(
                     name=cluster_name,
                     min_size=data_cluster.get('min_size', 1),
@@ -202,6 +234,7 @@ class CreateCluster(Resource):
                     profile_id=profile.id
                 )
 
+                # 클러스터 > 정책 생성 및 적용
                 policy_lb = conn.clustering.create_policy(
                     name='%s_policy_lb' % cluster_name,
                     spec={
@@ -224,13 +257,6 @@ class CreateCluster(Resource):
 
                 conn.clustering.attach_policy_to_cluster(cluster.id, policy_lb.id)
 
-                floating_ip = conn_admin.network.create_ip(
-                    project_id=req_data['project_id'],
-                    port_id=lb.vip_port_id,
-                    floating_network_id=data_lb['provider_network_id'],
-                    floating_ip_address=data_lb.get('provider_network_ip')
-                )
-
                 req_data['id'] = cluster.id
                 data_cluster_profile['id'] = profile.id
                 data_lb['id'] = lb.id
@@ -238,6 +264,9 @@ class CreateCluster(Resource):
                 data_lb['provider_network_ip'] = floating_ip.floating_ip_address
 
             except Exception as e:
+                if floating_ip is not None:
+                    conn.delete_floating_ip(floating_ip.id)
+
                 if lb is not None:
                     conn.load_balancer.delete_load_balancer(lb, cascade=True)
 
@@ -246,32 +275,24 @@ class CreateCluster(Resource):
 
                 if cluster is not None:
                     if policy_lb is not None:
-                        conn.clustering.detach_policy_from_cluster(cluster, policy_lb)
+                        action = conn.clustering.detach_policy_from_cluster(cluster, policy_lb)
+                        conn.clustering.wait_for_status(action, 'SUCCEEDED')
                         conn.clustering.delete_policy(policy_lb)
 
                     conn.clustering.delete_cluster(cluster)
+                    conn.clustering.wait_for_delete(cluster)
                     conn.clustering.delete_profile(profile)
-
-                if floating_ip is not None:
-                    conn.delete_floating_ip(floating_ip.id)
 
                 raise e
 
         return req_data
 
 
-@namespace.route('/<string:id>')
-@namespace.param('id', '클러스터 식별자')
+@namespace.route('/<string:cluster_id>')
+@namespace.param('cluster_id', '클러스터 식별자')
 class Cluster(Resource):
     @namespace.marshal_with(model_cluster)
-    def get(self):
-        pass
-
-    @namespace.expect(model_cluster)
-    def put(self):
-        pass
-
-    def delete(self, id):
+    def get(self, cluster_id):
         with openstack.connect(
                 auth_url="http://192.168.15.40:5000/v3",
                 project_id="925aba3de85a48ccb284bf02edc1c18e",
@@ -284,13 +305,87 @@ class Cluster(Resource):
             cluster = None
 
             try:
-                cluster = conn.clustering.get_cluster(id)
+                cluster = conn.clustering.get_cluster(cluster_id)
             except ResourceNotFound:
                 return '', 404
 
             lb_id = None
 
-            for cluster_policy in conn.clustering.cluster_policies(id):
+            resp_data = {
+                'id': cluster_id,
+                'name': cluster.name,
+                'project_id': cluster.project_id,
+                'cluster': {},
+                'loadbalancer': {}
+            }
+            resp_data_cluster = resp_data['cluster']
+            resp_data_lb = resp_data['loadbalancer']
+
+            profile = conn.get_cluster_profile(cluster.profile_id)
+
+            profile_prop = profile.spec.get('properties', {})
+            resp_data['network_id'] = profile_prop.get('networks', [])[0].get('network')
+            resp_data_cluster['min_size'] = cluster.min_size
+            resp_data_cluster['max_size'] = cluster.max_size
+            resp_data_cluster['desired_capacity'] = cluster.desired_capacity
+
+            resp_data_cluster['profile'] = {
+                'id': profile.id,
+                'name': profile_prop['name'],
+                'flavor': profile_prop['flavor'],
+                'image': profile_prop['image'],
+                'key_name': profile_prop['key_name'],
+                'security_group': profile_prop.get('networks', [])[0].get('security_groups')[0]
+            }
+
+            lb_cluster_policy = next(conn.clustering.cluster_policies(cluster_id, policy_type='senlin.policy.loadbalance-1.1'))
+
+            lb_policy = conn.clustering.get_policy(lb_cluster_policy.policy_id)
+
+            lb_policy_prop = lb_policy['spec'].get('properties', {})
+            resp_data_lb['id'] = lb_policy_prop['loadbalancer']
+            resp_data_lb['pool_id'] = lb_policy_prop['pool']['id']
+            resp_data_lb['provider_subnet_id'] = lb_policy_prop['vip']['subnet']
+
+            resp_data['subnet_id'] = lb_policy_prop['pool']['subnet']
+
+            lb = conn.load_balancer.get_load_balancer(resp_data_lb['id'])
+
+            resp_data['network_id'] = lb.vip_network_id
+
+            # listener = next(conn.load_balacner.listeners(load_balancer_id=lb.id))
+            #
+            # resp_data_lb['protocol'] = listener.protocol
+            # resp_data_lb['port'] = listener.port
+            # resp_data_lb['connection_limit'] = listener.connection_limit
+            # resp_data_lb['connection_']
+
+            # Pool
+
+            return resp_data
+
+    @namespace.expect(model_cluster, validate=True)
+    def delete(self, cluster_id):
+        with openstack.connect(
+                auth_url="http://192.168.15.40:5000/v3",
+                project_id="925aba3de85a48ccb284bf02edc1c18e",
+                username="admin",
+                password="1234qwer",
+                region_name="RegionOne",
+                user_domain_name="default",
+                project_domain_name="default",
+        ) as conn:
+            cluster = None
+
+            try:
+                cluster = conn.clustering.get_cluster(cluster_id)
+            except ResourceNotFound:
+                return '', 404
+
+            lb_id = None
+
+            # 클러스터 > 정책 삭제
+            for cluster_policy in conn.clustering.cluster_policies(cluster_id):
                 if 'senlin.policy.loadbalance' in cluster_policy.policy_type:
                     lb_id = cluster_policy.data['LoadBalancingPolicy']['data']['loadbalancer']
 
@@ -299,6 +394,14 @@ class Cluster(Resource):
                 conn.clustering.wait_for_status(action, 'SUCCEEDED')
                 conn.clustering.delete_policy(cluster_policy.policy_id)
 
+            # 클러스터 > 리시버 삭제
+            for receiver in conn.clustering.receivers(cluster_id=cluster_id):
+                conn.clustering.delete_receiver(receiver)
+                conn.clustering.wait_for_delete(receiver)
+
+                delete_alarm(conn.auth_token, receiver.id)
+
+            # 클러스터 및 프로파일 삭제
             profile = conn.get_cluster_profile(cluster.profile_id)
 
             server_group_id = profile.spec.get('properties', {}).get('scheduler_hints', {}).get('group')
@@ -307,9 +410,11 @@ class Cluster(Resource):
             conn.clustering.wait_for_delete(cluster)
             conn.clustering.delete_profile(profile)
 
+            # 서버 그룹 삭제
             if server_group_id is not None:
                 conn.delete_server_group(server_group_id)
 
+            # 로드밸런서 및 Floating IP 삭제
             if lb_id is not None:
                 try:
                     lb = conn.load_balancer.get_load_balancer(lb_id)
@@ -325,11 +430,155 @@ class Cluster(Resource):
 
             return None, 200
 
-# @namespace.route('/as-policy')
-# class AutoScalingPolicy(Resource):
-#     def get(self):
-#         pass
+
+@namespace.route('/<string:cluster_id>/scaling-policy')
+@namespace.param('cluster_id', '클러스터 식별자')
+class AutoScalingPolicy(Resource):
+    @namespace.marshal_with(model_asp, )
+    def get(self, cluster_id):
+        with openstack.connect(
+                auth_url="http://192.168.15.40:5000/v3",
+                project_id="925aba3de85a48ccb284bf02edc1c18e",
+                username="admin",
+                password="1234qwer",
+                region_name="RegionOne",
+                user_domain_name="default",
+                project_domain_name="default",
+        ) as conn:
+            cluster_policies = list(conn.clustering.cluster_policies(cluster_id, policy_type='senlin.policy.scaling-1.0'))
+
+            if cluster_policies:
+                for cluster_policy in cluster_policies:
+                    pp.pprint(cluster_policy)
+            else:
+                ## scaling-in
+                ### policy
+
+                ### receiver
+
+                ### aodh
+
+
+                ## scaling-out
+                ### policy
+
+                ### receiver
+
+                ### aodh
+
+                pass
+
+        return ''
+
+    @namespace.expect(model_asp, validate=True)
+    def put(self, cluster_id):
+        req_data = request.json
+
+        with openstack.connect(
+                auth_url="http://192.168.15.40:5000/v3",
+                project_id="925aba3de85a48ccb284bf02edc1c18e",
+                username="admin",
+                password="1234qwer",
+                region_name="RegionOne",
+                user_domain_name="default",
+                project_domain_name="default",
+        ) as conn:
+            cluster = None
+
+            try:
+                cluster = conn.clustering.get_cluster(cluster_id)
+            except ResourceNotFound:
+                return '', 404
+
+            lb_id = None
+
+            cluster_policies = list(
+                conn.clustering.cluster_policies(cluster_id, policy_type='senlin.policy.scaling-1.0'))
+
+            if cluster_policies:
+                for cluster_policy in cluster_policies:
+                    pp.pprint(cluster_policy)
+            else:
+                ## scaling-in
+                ### 1. policy
+                profile = conn.clustering.create_profile(
+                    name='%s_policy_scaling-in' % cluster.name,
+                    spec={
+                        'type': 'senlin.policy.scaling',
+                        'version': 1.0,
+                        'properties': {
+                            'adjustment': {
+
+                            },
+                            'event': 'CLUSTER_SCALE_IN'
+                        }
+                    }
+                )
+                ### 2. receiver
+
+                ### 3. aodh
+
+                ## scaling-out
+                ### policy
+
+                ### receiver
+
+                ### aodh
+
+                pass
+
+        return req_data
+
+# def get_alarm(receiver_id, auth_key):
+#     if not receiver_id:
+#         raise ValueError("receiver_id can't be null")
 #
-#     @namespace.expect(model_as)
-#     def post(self):
-#         pass
+#     if not auth_key:
+#         raise ValueError("auth_key can't be null")
+#
+#     url = "http://192.168.15.40:8042/v2/alarms?q.field=name&q.op=eq&q.value=%s" % recevier_id
+#
+#     headers = {
+#         'X-Auth-Token': auth_key
+#     }
+#
+#     response = requests.request("GET", url, headers=headers)
+#
+#     alarm_list = response.json()
+#
+#     if not alarm_list:
+#         return None
+#
+#     return alarm_list[0]
+
+
+def create_alarm(auth_token, data):
+    if not auth_token:
+        raise ValueError("auth_token can't be null")
+
+    url = "http://192.168.15.40:8042/v2/alarms"
+
+    headers = {
+        'X-Auth-Token': auth_token
+    }
+
+    requests.request("POST", url, data=data, headers=headers)
+
+    # return response.json()
+
+
+def delete_alarm(auth_token, receiver_id):
+    if not receiver_id:
+        raise ValueError("receiver_id can't be null")
+
+    if not auth_token:
+        raise ValueError("auth_token can't be null")
+
+    url = "http://192.168.15.40:8042/v2/alarms/%s" % receiver_id
+
+    headers = {
+        'X-Auth-Token': auth_token
+    }
+
+    response = requests.request("DELETE", url, headers=headers)
+
