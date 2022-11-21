@@ -3,109 +3,11 @@ import requests
 import json
 from flask import request  # 서버 구현을 위한 Flask 객체 import
 from flask import current_app, g
-from flask_restx import Namespace, Resource, fields, marshal, marshal_with  # Api 구현을 위한 Api 객체 import
+from flask_restx import Namespace, Resource, fields, marshal  # Api 구현을 위한 Api 객체 import
 import openstack
 from openstack.exceptions import ResourceNotFound, HttpException
-
-pp = pprint.PrettyPrinter()
-
-namespace = Namespace(
-    name="smart-cluster",
-    description="AutoScaling 정책 정의"
-)
-
-model_cluster_profile = namespace.model('Cluster_cluster_profile', {
-        'id': fields.String(description='프로파일 식별자'),
-        'name': fields.String(description='인스턴스 명칭', required=True),
-        'flavor': fields.String(description="프로파일 Flavor's Name", required=True, example='m1.small'),
-        'image': fields.String(description="프로파일 Image's Id", required=True),
-        'key_name': fields.String(description="프로파일 Keypair's Name", required=True),
-        # 'server_group': fields.String(description=""), # 새로 생성
-        'security_group': fields.String(description="프로파일 Security Group's Name", required=True)
-    })
-
-model_cluster_info = namespace.model('Cluster_cluster', {
-        'min_size': fields.Integer(description='클러스터 최소 노드 개수', default=1),
-        'max_size': fields.Integer(description='클러스터 최대 노드 개수', default=-1),
-        'desired_capacity': fields.Integer(description='클러스터 노드 개수', default=0),
-        'profile': fields.Nested(model_cluster_profile, description="클러스터의 프로파일 정보")
-    })
-
-model_lb_sp = namespace.model('Cluster_lb_sp', {
-        'type': fields.String(required=True, example="[APP_COOKIE, HTTP_COOKIE, SOURCE_IP]"),
-        'cookie_name': fields.String(required=False, description="APP_COOKIE일 때, 쿠키명"),
-        'persistence_timeout': fields.Integer(required=False, description="SOURCE_IP일 때, 제한시간"),
-        'persistence_granularity': fields.String(required=False, description="SOURCE_IP일 때, Netmask")
-    })
-
-model_lb_hm = namespace.model('Cluster_lb_hm', {
-        'type': fields.String(required=True, description="모니터링 유형",
-                              example="[PING,HTTP,TCP,HTTPS,TLS-HELLO,UDP-CONNECT]"),
-        'retries_down': fields.Integer(default=3, description="비활성 판단을 위한 시도 횟수"),
-        'retries': fields.Integer(default=3, description="활성 판단을 위한 시도 횟수"),
-        'delay': fields.Integer(default=5, description="health check 간격 (second)"),
-        'timeout': fields.Integer(default=5, description="health check 대기시간 (second)"),
-        ### HTTP/HTTPS ###
-        'url': fields.String(description="HTTP/HTTPS일 때, health check 요청 URL",
-                             required=False),
-        'method': fields.String(description="HTTP/HTTPS일 때, health check 요청 Method",
-                                example="[GET,POST,DELETE,PUT,HEAD,OPTIONS,PATCH,CONNECT,TRACE]",
-                                required=False),
-        'expected_codes': fields.String(description="HTTP/HTTPS일 때, 활성 판단할 Status Code",
-                                        example="(single) 200 / (multiple) 200,202 / (range) 200-204",
-                                        required=False)
-    })
-
-model_lb = namespace.model('Cluster_lb', {
-        'id': fields.String(description="로드밸런서 식별자", requried=False),
-        'pool_id': fields.String(description="Pool 식별자", required=False),
-        # openstack floating ip create --floating-ip-address 192.168.53.151 --project vm-autoscaling provider
-        'provider_network_id': fields.String(description="Provider Network ID", required=True),
-        'provider_subnet_id': fields.String(description="Provider Network Subnet ID", required=True),
-        'provider_network_ip': fields.String(description="Fixed Floating IP", required=False),
-        'protocol': fields.String(description="Listen Protocol", required=True,
-                                  example="[TCP,HTTP,HTTPS,TERMINATED_HTTPS,UDP]"),
-        'port': fields.Integer(description="Listen Port 번호 (0-65535)", required=True),
-        'connection_limit': fields.Integer(descripiton="연결 제한 수", default=-1),
-        'session_persistence': fields.Nested(model_lb_sp, required=False, example="(key=value)",
-                                             descripiton="세션 영속성 유지를 위한 정보"),
-        'lb_algorithm': fields.String(description="로드밸런서 알고리즘", required=True,
-                                      default="ROUND_ROBIN",
-                                      example="[SOURCE_IP,ROUND_ROBIN,LEAST_CONNECTIONS,SOURCE_IP_PORT]"),
-        'health_monitor': fields.Nested(model_lb_hm, description="Load Balancer의 Health Monitor 정보")
-    }, description="Load Balancer 정보")
-
-model_cluster = namespace.model('Cluster', {
-    'id': fields.String(description="클러스터 식별자", required=False),
-    'name': fields.String(description="클러스터 명칭", required=True),
-    # 'description': fields.String(description="클러스터 설명", required=False),
-    'project_id': fields.String(description="클러스터를 생성할 프로젝트 ID", required=True),
-    'network_id': fields.String(description="클러스터의 Node들이 사용할 네트워크 ID", required=True),
-    'subnet_id': fields.String(description="클러스터의 Node들이 사용할 네트워크 서브넷 ID", required=True),
-    'cluster': fields.Nested(model_cluster_info, required=True),
-    'loadbalancer': fields.Nested(model_lb, required=True)
-})
-
-model_asp_scaling = namespace.model('AutoScalingPolicy_Scaling', {
-    'type': fields.String(description='number 유형', requried=True, default='CHANGE_IN_CAPACITY',
-                          example='[EXACT_CAPACITY, CHANGE_IN_CAPACITY, CHANGE_IN_PERCENTAGE]'),
-    'number': fields.Integer(description='Scaling 크기', default=1),
-    'min_step': fields.Integer(description='최소 Scaling 크기', default=1),
-    'cooldown': fields.Integer(description='Cooldown 시간', default=60),
-    'metric': fields.String(description='메트릭', required=True),
-    'aggregation_method': fields.String(description='집계 함수', required=True),
-    'threshold': fields.Float(description='임계치', required=True),
-    'comparison_op': fields.String(description='임계치 비교연산자', required=True,
-                                   example="['lt', 'le', 'eq', 'ne', 'ge', 'gt']"),
-    'evaluation_period': fields.Integer(description='평가횟수',  default=1),
-    'repeat': fields.Boolean(description='반복여부', default=True)
-})
-
-model_asp = namespace.model('AutoScalingPolicy', {
-    'id': fields.String(description="클러스터 식별자", required=True),
-    'scaling_in': fields.Nested(model_asp_scaling, required=True),
-    'scaling_out': fields.Nested(model_asp_scaling, required=True)
-})
+from smart_cluster import namespace, pp
+from smart_cluster.model import model_cluster, model_asp
 
 
 @namespace.route('/')
@@ -339,7 +241,8 @@ class Cluster(Resource):
                 'security_group': profile_prop.get('networks', [])[0].get('security_groups')[0]
             }
 
-            lb_cluster_policy = next(conn.clustering.cluster_policies(cluster_id, policy_type='senlin.policy.loadbalance-1.1'))
+            lb_cluster_policy = next(
+                conn.clustering.cluster_policies(cluster_id, policy_type='senlin.policy.loadbalance-1.1'))
 
             lb_policy = conn.clustering.get_policy(lb_cluster_policy.policy_id)
 
@@ -389,7 +292,6 @@ class Cluster(Resource):
 
             return resp_data
 
-    @namespace.expect(model_cluster, validate=True)
     def delete(self, cluster_id):
         with openstack.connect(
                 auth_url="http://192.168.15.40:5000/v3",
@@ -453,13 +355,13 @@ class Cluster(Resource):
                 except ResourceNotFound:
                     pass
 
-            return None, 200
+            return None, 204
 
 
 @namespace.route('/<string:cluster_id>/scaling-policy')
 @namespace.param('cluster_id', '클러스터 식별자')
 class AutoScalingPolicy(Resource):
-    @namespace.marshal_with(model_asp, )
+    @namespace.marshal_with(model_asp)
     def get(self, cluster_id):
         with openstack.connect(
                 auth_url="http://192.168.15.40:5000/v3",
@@ -470,30 +372,37 @@ class AutoScalingPolicy(Resource):
                 user_domain_name="default",
                 project_domain_name="default",
         ) as conn:
-            cluster_policies = list(conn.clustering.cluster_policies(cluster_id, policy_type='senlin.policy.scaling-1.0'))
 
-            if cluster_policies:
-                for cluster_policy in cluster_policies:
-                    pp.pprint(cluster_policy)
-            else:
-                ## scaling-in
-                ### policy
+            try:
+                cluster_policies = list(
+                    conn.clustering.cluster_policies(cluster_id, policy_type='senlin.policy.scaling-1.0'))
+            except ResourceNotFound:
+                return '', 404
 
-                ### receiver
+            resp_data = {
+                'id': cluster_id,
+            }
 
-                ### aodh
+            policies = []
 
+            for cp in cluster_policies:
+                policies.append(conn.clustering.get_policy(cp.policy_id))
 
-                ## scaling-out
-                ### policy
+            #scaling-in
+            event = 'CLUSTER_SCALE_IN'
 
-                ### receiver
+            policy = next((p for p in policies if p.spec['properties']['event'] == event), None)
 
-                ### aodh
+            resp_data['scaling_in'] = self.__get_scaling_policy(conn, cluster_id, policy, event)
 
-                pass
+            #scaling-out
+            event = 'CLUSTER_SCALE_OUT'
 
-        return ''
+            policy = next((p for p in policies if p.spec['properties']['event'] == event), None)
+
+            resp_data['scaling_out'] = self.__get_scaling_policy(conn, cluster_id, policy, event)
+
+            return resp_data
 
     @namespace.expect(model_asp, validate=True)
     def put(self, cluster_id):
@@ -529,9 +438,9 @@ class AutoScalingPolicy(Resource):
             ## scaling-in
             ### 1. policy
             event = 'CLUSTER_SCALE_IN'
-            self.create_scaling_policy(conn, cluster,
-                                                '%s_policy_scaling-in' % cluster.name,
-                                                event, data_scaling_in)
+            self.__create_scaling_policy(conn, cluster,
+                                       '%s_policy_scaling-in' % cluster.name,
+                                         event, data_scaling_in)
 
             alarm = None
             receiver_scaling_in = None
@@ -543,7 +452,7 @@ class AutoScalingPolicy(Resource):
 
                     if receivers:
                         receiver_scaling_in = receivers[0]
-                        alarm = self.get_alarm(conn.auth_token, receiver_scaling_in.id)
+                        alarm = self.__get_alarm(conn.auth_token, receiver_scaling_in.id)
 
                 except ResourceNotFound:
                     pass
@@ -556,17 +465,17 @@ class AutoScalingPolicy(Resource):
                     type='webhook'
                 )
 
-            alarm_data = self.create_alarm_data(cluster, receiver_scaling_in, data_scaling_in)
+            alarm_data = self.__create_alarm_data(cluster, receiver_scaling_in, data_scaling_in)
 
             ### 3. aodh
-            self.create_or_update_alarm(conn.auth_token, alarm_data, alarm.get('alarm_id') if alarm else None)
+            self.__create_or_update_alarm(conn.auth_token, alarm_data, alarm.get('alarm_id') if alarm else None)
 
             ## scaling-out
             ### 1. policy
             event = 'CLUSTER_SCALE_OUT'
-            self.create_scaling_policy(conn, cluster,
+            self.__create_scaling_policy(conn, cluster,
                                        '%s_policy_scaling-out' % cluster.name,
-                                       event, data_scaling_out)
+                                         event, data_scaling_out)
 
             alarm = None
             receiver_scaling_out = None
@@ -578,7 +487,7 @@ class AutoScalingPolicy(Resource):
 
                     if receivers:
                         receiver_scaling_out = receivers[0]
-                        alarm = self.get_alarm(conn.auth_token, receiver_scaling_out.id)
+                        alarm = self.__get_alarm(conn.auth_token, receiver_scaling_out.id)
 
                 except ResourceNotFound:
                     pass
@@ -592,23 +501,65 @@ class AutoScalingPolicy(Resource):
                 )
 
             ### 3. aodh
-            alarm_data = self.create_alarm_data(cluster, receiver_scaling_out, data_scaling_out)
+            alarm_data = self.__create_alarm_data(cluster, receiver_scaling_out, data_scaling_out)
             alarm_data['severity'] = 'critical'
-            self.create_or_update_alarm(conn.auth_token, alarm_data, alarm.get('alarm_id') if alarm else None)
+            self.__create_or_update_alarm(conn.auth_token, alarm_data, alarm.get('alarm_id') if alarm else None)
 
         return req_data
 
     def delete(self, cluster_id):
-        pass
+        with openstack.connect(
+                auth_url="http://192.168.15.40:5000/v3",
+                project_id="925aba3de85a48ccb284bf02edc1c18e",
+                username="admin",
+                password="1234qwer",
+                region_name="RegionOne",
+                user_domain_name="default",
+                project_domain_name="default",
+        ) as conn:
+            try:
+                cluster = conn.clustering.get_cluster(cluster_id)
+            except ResourceNotFound:
+                return '', 404
+
+            cluster_policies = list(
+                conn.clustering.cluster_policies(cluster_id, policy_type='senlin.policy.scaling-1.0'))
+
+            for cp in cluster_policies:
+                action_info = conn.clustering.detach_policy_from_cluster(cluster, cp.policy_id)
+                action = conn.clustering.get_action(action_info['action'])
+                conn.clustering.wait_for_status(action, 'SUCCEEDED')
+                conn.clustering.delete_policy(cp.policy_id)
+
+            event = 'CLUSTER_SCALE_IN'
+            receivers = list(conn.clustering.receivers(cluster_id=cluster_id, action=event))
+
+            for receiver in receivers:
+                conn.clustering.delete_receiver(receiver)
+                conn.clustering.wait_for_delete(receiver)
+
+                self.__delete_alarm(conn.auth_token, receiver.id)
+
+            event = 'CLUSTER_SCALE_OUT'
+            receivers = list(conn.clustering.receivers(cluster_id=cluster_id, action=event))
+
+            for receiver in receivers:
+                conn.clustering.delete_receiver(receiver)
+                conn.clustering.wait_for_delete(receiver)
+
+                self.__delete_alarm(conn.auth_token, receiver.id)
+
+            return None, 204
+
 
     @staticmethod
-    def create_alarm_data(cluster, receiver, data_scaling):
+    def __create_alarm_data(cluster, receiver, data_scaling):
         threshold = data_scaling['threshold']
 
         if data_scaling['metric'] == 'cpu':
             threshold = threshold * 20 * 1000000000
 
-        #TODO: metric별 resource_type 매핑이 필요함.
+        # TODO: metric별 resource_type 매핑이 필요함.
         return {
             'alarm_actions': [receiver.channel['alarm_url']],
             'name': receiver.id,
@@ -627,7 +578,7 @@ class AutoScalingPolicy(Resource):
         }
 
     @staticmethod
-    def create_scaling_policy(conn, cluster, name, event, data):
+    def __create_scaling_policy(conn, cluster, name, event, data):
         policy = conn.clustering.create_policy(
             name=name,
             spec={
@@ -649,8 +600,46 @@ class AutoScalingPolicy(Resource):
         conn.clustering.attach_policy_to_cluster(cluster.id, policy.id)
         return policy
 
+    def __get_scaling_policy(self, conn, cluster_id, policy, event):
+        data_scaling = {}
+
+        if not policy:
+            return data_scaling
+
+        prop = policy.spec['properties']['adjustment']
+
+        data_scaling['type'] = prop['type']
+        data_scaling['number'] = prop['number']
+        data_scaling['min_step'] = prop['min_step']
+        data_scaling['cooldown'] = prop['cooldown']
+
+        receivers = list(conn.clustering.receivers(cluster_id=cluster_id, action=event))
+
+        receiver = None
+
+        if receivers:
+            receiver = receivers[0]
+
+            alarm = self.__get_alarm(conn.auth_token, receiver.id)
+
+            # if alarm:
+            rule = alarm.get('gnocchi_aggregation_by_resources_threshold_rule')
+            data_scaling['metric'] = rule['metric']
+            data_scaling['aggregation_method'] = rule['aggregation_method']
+
+            if rule['metric'] == 'cpu':
+                data_scaling['threshold'] = rule['threshold'] / 20 / 1000000000
+            else:
+                data_scaling['threshold'] = rule['threshold']
+
+            data_scaling['comparison_op'] = rule['comparison_operator']
+            data_scaling['evaluation_period'] = rule['evaluation_periods']
+            data_scaling['repeat'] = alarm['repeat_actions']
+
+            return data_scaling
+
     @staticmethod
-    def get_alarm(auth_token, receiver_id):
+    def __get_alarm(auth_token, receiver_id):
         if not receiver_id:
             raise ValueError("name can't be null")
 
@@ -670,7 +659,7 @@ class AutoScalingPolicy(Resource):
         return alarm_list[0] if alarm_list else None
 
     @staticmethod
-    def create_or_update_alarm(auth_token, data, alarm_id=None):
+    def __create_or_update_alarm(auth_token, data, alarm_id=None):
         if not auth_token:
             raise ValueError("auth_token can't be null")
 
@@ -698,7 +687,7 @@ class AutoScalingPolicy(Resource):
             raise HttpException("error creating alarm")
 
     @staticmethod
-    def delete_alarm(auth_token, receiver_id):
+    def __delete_alarm(auth_token, receiver_id):
         if not receiver_id:
             raise ValueError("receiver_id can't be null")
 
@@ -712,4 +701,3 @@ class AutoScalingPolicy(Resource):
         }
 
         response = requests.request("DELETE", url, headers=headers)
-
