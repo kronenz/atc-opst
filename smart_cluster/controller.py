@@ -179,7 +179,7 @@ class CreateCluster(Resource):
                     if policy_lb is not None:
                         action_info = conn.clustering.detach_policy_from_cluster(cluster, policy_lb)
 
-                        if action_info and action_info in 'action'
+                        if action_info and action_info in 'action':
                             action = conn.clustering.get_action(action_info['action'])
                             conn.clustering.wait_for_status(action, 'SUCCEEDED')
 
