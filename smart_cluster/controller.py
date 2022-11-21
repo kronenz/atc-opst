@@ -192,6 +192,115 @@ class CreateCluster(Resource):
                 raise e
 
         return req_data
+#### Cluster데이터를 id요청없이 전체 목록을 가져오게 함 ####
+#작성자 : 변상현 책임연구원워
+@namespace.route('/cluster_all')
+class Cluster(Resource):
+    def get(self):
+        with openstack.connect(
+                auth_url="http://192.168.15.40:5000/v3",
+                project_id="925aba3de85a48ccb284bf02edc1c18e",
+                username="admin",
+                password="1234qwer",
+                region_name="RegionOne",
+                user_domain_name="default",
+                project_domain_name="default",
+        ) as conn:
+            cluster = None
+
+            ##클러스터 데이터 요청
+            requrl = 'http://192.168.15.135:8000/metric/vm/clusterlist'
+            rqd = requests.get(requrl)
+            jd = rqd.json()
+            res_data={}
+            for cluster_id in jd:
+                try: 
+                    cluster = conn.clustering.get_cluster(cluster_id)
+                except ResourceNotFound:
+                    return '', 404
+
+                lb_id = None
+
+                resp_data = {
+                    'id': cluster_id,
+                    'name': cluster.name,
+                    'project_id': cluster.project_id,
+                    'cluster': {},
+                    'loadbalancer': {}
+                }
+                resp_data_cluster = resp_data['cluster']
+                resp_data_lb = resp_data['loadbalancer']
+
+                profile = conn.get_cluster_profile(cluster.profile_id)
+
+                profile_prop = profile.spec.get('properties', {})
+                resp_data['network_id'] = profile_prop.get('networks', [])[0].get('network')
+                resp_data_cluster['min_size'] = cluster.min_size
+                resp_data_cluster['max_size'] = cluster.max_size
+                resp_data_cluster['desired_capacity'] = cluster.desired_capacity
+
+                resp_data_cluster['profile'] = {
+                    'id': profile.id,
+                    'name': profile_prop['name'],
+                    'flavor': profile_prop['flavor'],
+                    'image': profile_prop['image'],
+                    'key_name': profile_prop['key_name'],
+                    'security_group': profile_prop.get('networks', [])[0].get('security_groups')[0]
+                }
+
+                lb_cluster_policy = next(
+                    conn.clustering.cluster_policies(cluster_id, policy_type='senlin.policy.loadbalance-1.1'))
+
+                lb_policy = conn.clustering.get_policy(lb_cluster_policy.policy_id)
+
+                lb_policy_prop = lb_policy['spec'].get('properties', {})
+                resp_data_lb['id'] = lb_policy_prop['loadbalancer']
+                resp_data_lb['pool_id'] = lb_policy_prop['pool']['id']
+                resp_data_lb['provider_subnet_id'] = lb_policy_prop['vip']['subnet']
+
+                resp_data['subnet_id'] = lb_policy_prop['pool']['subnet']
+
+                # 로드밸런서
+                lb = conn.load_balancer.get_load_balancer(resp_data_lb['id'])
+
+                resp_data['network_id'] = lb.vip_network_id
+
+                # 로드밸런서 > 리스너
+                listener = next(conn.load_balancer.listeners(load_balancer_id=lb.id))
+
+                resp_data_lb['protocol'] = listener.protocol
+                resp_data_lb['port'] = listener.protocol_port
+                resp_data_lb['connection_limit'] = listener.connection_limit
+                # resp_data_lb['connection_']
+
+                # 로드밸런서 > 리스너 > 풀
+                pool = next(conn.load_balancer.pools(loadbalancer_id=lb.id))
+
+                resp_data_lb['lb_algorithm'] = pool.lb_algorithm
+                resp_data_lb['session_persistence'] = pool.session_persistence
+
+                hm = conn.load_balancer.get_health_monitor(pool.health_monitor_id)
+
+                resp_data_lb['health_monitor'] = {
+                    'type': hm.type,
+                    'retries_down': hm.max_retries_down,
+                    'retries': hm.max_retries,
+                    'delay': hm.delay,
+                    'timeout': hm.timeout,
+                    'url': hm.url_path,
+                    'method': hm.http_method,
+                    'expected_codes': hm.expected_codes
+                }
+
+                vip = next(conn.network.ips(port_id=lb.vip_port_id))
+
+                resp_data_lb['provider_network_id'] = vip['floating_network_id']
+                resp_data_lb['provider_network_ip'] = vip['floating_ip_address']
+
+                res_data[cluster_id] = resp_data
+
+            return res_data
+#end of Cluster Data All
 
 
 @namespace.route('/<string:cluster_id>')
