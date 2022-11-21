@@ -17,9 +17,9 @@ class ClusterNodes(Resource):
                 user_domain_name="default",
                 project_domain_name="default",
         ) as conn:
-            ids = [node['physical_id'] for node in conn.clustering.nodes(cluster_id=cluster_id)]
-
-            if ids:
-                return [server.to_dict() for server in conn.compute.servers(id in ids)]
-            else:
-                return []
+            # ids = [node['physical_id'] for node in conn.clustering.nodes(cluster_id=cluster_id)]
+            # if ids:
+            return [server.to_dict() for server in conn.compute.servers() if
+                    server.metadata.get('cluster_id', None) == cluster_id]
+            # else:
+            #     return []
