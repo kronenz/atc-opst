@@ -178,8 +178,11 @@ class CreateCluster(Resource):
                 if cluster is not None:
                     if policy_lb is not None:
                         action_info = conn.clustering.detach_policy_from_cluster(cluster, policy_lb)
-                        action = conn.clustering.get_action(action_info['action'])
-                        conn.clustering.wait_for_status(action, 'SUCCEEDED')
+
+                        if action_info and action_info in 'action'
+                            action = conn.clustering.get_action(action_info['action'])
+                            conn.clustering.wait_for_status(action, 'SUCCEEDED')
+
                         conn.clustering.delete_policy(policy_lb)
 
                     conn.clustering.delete_cluster(cluster)
@@ -317,8 +320,11 @@ class Cluster(Resource):
                     lb_id = cluster_policy.data['LoadBalancingPolicy']['data']['loadbalancer']
 
                 action_info = conn.clustering.detach_policy_from_cluster(cluster, cluster_policy.policy_id)
-                action = conn.clustering.get_action(action_info['action'])
-                conn.clustering.wait_for_status(action, 'SUCCEEDED')
+
+                if action_info and action_info in 'action':
+                    action = conn.clustering.get_action(action_info['action'])
+                    conn.clustering.wait_for_status(action, 'SUCCEEDED')
+
                 conn.clustering.delete_policy(cluster_policy.policy_id)
 
             # 클러스터 > 리시버 삭제
@@ -527,8 +533,11 @@ class AutoScalingPolicy(Resource):
 
             for cp in cluster_policies:
                 action_info = conn.clustering.detach_policy_from_cluster(cluster, cp.policy_id)
-                action = conn.clustering.get_action(action_info['action'])
-                conn.clustering.wait_for_status(action, 'SUCCEEDED')
+
+                if action_info and action_info in 'action':
+                    action = conn.clustering.get_action(action_info['action'])
+                    conn.clustering.wait_for_status(action, 'SUCCEEDED')
+
                 conn.clustering.delete_policy(cp.policy_id)
 
             event = 'CLUSTER_SCALE_IN'
@@ -557,7 +566,7 @@ class AutoScalingPolicy(Resource):
         threshold = data_scaling['threshold']
 
         if data_scaling['metric'] == 'cpu':
-            threshold = threshold * 20 * 1000000000
+            threshold = threshold * 20 * 1000000000 / 100
 
         # TODO: metric별 resource_type 매핑이 필요함.
         return {
@@ -628,7 +637,7 @@ class AutoScalingPolicy(Resource):
             data_scaling['aggregation_method'] = rule['aggregation_method']
 
             if rule['metric'] == 'cpu':
-                data_scaling['threshold'] = rule['threshold'] / 20 / 1000000000
+                data_scaling['threshold'] = rule['threshold'] / 20 / 1000000000 * 100
             else:
                 data_scaling['threshold'] = rule['threshold']
 
