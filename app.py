@@ -20,8 +20,11 @@ def create_app():
 
     api.add_namespace(hello, '/')
 
-    from smart_cluster.controller import namespace as smart_cluster
+    import smart_cluster.controller
+    import smart_cluster.controller_node
+    import smart_cluster.controller_policy
+    from smart_cluster import namespace as smart_cluster_namespace
 
-    api.add_namespace(smart_cluster, '/smart-cluster')
+    api.add_namespace(smart_cluster_namespace, '/smart-cluster')
 
     return app
