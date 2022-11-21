@@ -195,7 +195,7 @@ class CreateCluster(Resource):
 #### Cluster데이터를 id요청없이 전체 목록을 가져오게 함 ####
 #작성자 : 변상현 책임연구원워
 @namespace.route('/cluster_all')
-class Cluster(Resource):
+class ClusterList(Resource):
     def get(self):
         with openstack.connect(
                 auth_url="http://192.168.15.40:5000/v3",
