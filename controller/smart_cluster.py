@@ -1,10 +1,11 @@
 import pprint
 import requests
+import json
 from flask import request  # 서버 구현을 위한 Flask 객체 import
 from flask import current_app, g
 from flask_restx import Namespace, Resource, fields, marshal, marshal_with  # Api 구현을 위한 Api 객체 import
 import openstack
-from openstack.exceptions import ResourceNotFound
+from openstack.exceptions import ResourceNotFound, HttpException
 
 pp = pprint.PrettyPrinter()
 
@@ -77,7 +78,7 @@ model_lb = namespace.model('Cluster_lb', {
 model_cluster = namespace.model('Cluster', {
     'id': fields.String(description="클러스터 식별자", required=False),
     'name': fields.String(description="클러스터 명칭", required=True),
-    'description': fields.String(description="클러스터 설명", required=False),
+    # 'description': fields.String(description="클러스터 설명", required=False),
     'project_id': fields.String(description="클러스터를 생성할 프로젝트 ID", required=True),
     'network_id': fields.String(description="클러스터의 Node들이 사용할 네트워크 ID", required=True),
     'subnet_id': fields.String(description="클러스터의 Node들이 사용할 네트워크 서브넷 ID", required=True),
@@ -85,11 +86,11 @@ model_cluster = namespace.model('Cluster', {
     'loadbalancer': fields.Nested(model_lb, required=True)
 })
 
-model_asp_scaling = namespace.model('AutoScalingPolicy_Scaling_In', {
+model_asp_scaling = namespace.model('AutoScalingPolicy_Scaling', {
     'type': fields.String(description='number 유형', requried=True, default='CHANGE_IN_CAPACITY',
                           example='[EXACT_CAPACITY, CHANGE_IN_CAPACITY, CHANGE_IN_PERCENTAGE]'),
     'number': fields.Integer(description='Scaling 크기', default=1),
-    'min_step': fields.Integer(description='최소 Scaling 크기', min_step=1),
+    'min_step': fields.Integer(description='최소 Scaling 크기', default=1),
     'cooldown': fields.Integer(description='Cooldown 시간', default=60),
     'metric': fields.String(description='메트릭', required=True),
     'aggregation_method': fields.String(description='집계 함수', required=True),
@@ -168,7 +169,6 @@ class CreateCluster(Resource):
                 )
 
                 conn.load_balancer.wait_for_load_balancer(lb.id)
-
 
                 # 로드밸런서 > 리스너 > 풀 생성
                 lb_pool = conn.load_balancer.create_pool(
@@ -275,7 +275,8 @@ class CreateCluster(Resource):
 
                 if cluster is not None:
                     if policy_lb is not None:
-                        action = conn.clustering.detach_policy_from_cluster(cluster, policy_lb)
+                        action_info = conn.clustering.detach_policy_from_cluster(cluster, policy_lb)
+                        action = conn.clustering.get_action(action_info['action'])
                         conn.clustering.wait_for_status(action, 'SUCCEEDED')
                         conn.clustering.delete_policy(policy_lb)
 
@@ -349,18 +350,42 @@ class Cluster(Resource):
 
             resp_data['subnet_id'] = lb_policy_prop['pool']['subnet']
 
+            # 로드밸런서
             lb = conn.load_balancer.get_load_balancer(resp_data_lb['id'])
 
             resp_data['network_id'] = lb.vip_network_id
 
-            # listener = next(conn.load_balacner.listeners(load_balancer_id=lb.id))
-            #
-            # resp_data_lb['protocol'] = listener.protocol
-            # resp_data_lb['port'] = listener.port
-            # resp_data_lb['connection_limit'] = listener.connection_limit
+            # 로드밸런서 > 리스너
+            listener = next(conn.load_balancer.listeners(load_balancer_id=lb.id))
+
+            resp_data_lb['protocol'] = listener.protocol
+            resp_data_lb['port'] = listener.protocol_port
+            resp_data_lb['connection_limit'] = listener.connection_limit
             # resp_data_lb['connection_']
 
-            # Pool
+            # 로드밸런서 > 리스너 > 풀
+            pool = next(conn.load_balancer.pools(loadbalancer_id=lb.id))
+
+            resp_data_lb['lb_algorithm'] = pool.lb_algorithm
+            resp_data_lb['session_persistence'] = pool.session_persistence
+
+            hm = conn.load_balancer.get_health_monitor(pool.health_monitor_id)
+
+            resp_data_lb['health_monitor'] = {
+                'type': hm.type,
+                'retries_down': hm.max_retries_down,
+                'retries': hm.max_retries,
+                'delay': hm.delay,
+                'timeout': hm.timeout,
+                'url': hm.url_path,
+                'method': hm.http_method,
+                'expected_codes': hm.expected_codes
+            }
+
+            vip = next(conn.network.ips(port_id=lb.vip_port_id))
+
+            resp_data_lb['provider_network_id'] = vip['floating_network_id']
+            resp_data_lb['provider_network_ip'] = vip['floating_ip_address']
 
             return resp_data
 
@@ -399,7 +424,7 @@ class Cluster(Resource):
                 conn.clustering.delete_receiver(receiver)
                 conn.clustering.wait_for_delete(receiver)
 
-                delete_alarm(conn.auth_token, receiver.id)
+                self.delete_alarm(conn.auth_token, receiver.id)
 
             # 클러스터 및 프로파일 삭제
             profile = conn.get_cluster_profile(cluster.profile_id)
@@ -473,6 +498,8 @@ class AutoScalingPolicy(Resource):
     @namespace.expect(model_asp, validate=True)
     def put(self, cluster_id):
         req_data = request.json
+        data_scaling_in = req_data['scaling_in']
+        data_scaling_out = req_data['scaling_out']
 
         with openstack.connect(
                 auth_url="http://192.168.15.40:5000/v3",
@@ -490,95 +517,199 @@ class AutoScalingPolicy(Resource):
             except ResourceNotFound:
                 return '', 404
 
-            lb_id = None
-
             cluster_policies = list(
                 conn.clustering.cluster_policies(cluster_id, policy_type='senlin.policy.scaling-1.0'))
 
+            for cp in cluster_policies:
+                action_info = conn.clustering.detach_policy_from_cluster(cluster, cp.policy_id)
+                action = conn.clustering.get_action(action_info['action'])
+                conn.clustering.wait_for_status(action, 'SUCCEEDED')
+                conn.clustering.delete_policy(cp.policy_id)
+
+            ## scaling-in
+            ### 1. policy
+            event = 'CLUSTER_SCALE_IN'
+            self.create_scaling_policy(conn, cluster,
+                                                '%s_policy_scaling-in' % cluster.name,
+                                                event, data_scaling_in)
+
+            alarm = None
+            receiver_scaling_in = None
+
+            ### 2. receiver
             if cluster_policies:
-                for cluster_policy in cluster_policies:
-                    pp.pprint(cluster_policy)
-            else:
-                ## scaling-in
-                ### 1. policy
-                profile = conn.clustering.create_profile(
-                    name='%s_policy_scaling-in' % cluster.name,
-                    spec={
-                        'type': 'senlin.policy.scaling',
-                        'version': 1.0,
-                        'properties': {
-                            'adjustment': {
+                try:
+                    receivers = list(conn.clustering.receivers(cluster_id=cluster_id, action=event))
 
-                            },
-                            'event': 'CLUSTER_SCALE_IN'
-                        }
-                    }
+                    if receivers:
+                        receiver_scaling_in = receivers[0]
+                        alarm = self.get_alarm(conn.auth_token, receiver_scaling_in.id)
+
+                except ResourceNotFound:
+                    pass
+
+            if receiver_scaling_in is None:
+                receiver_scaling_in = conn.clustering.create_receiver(
+                    name='%s_receiver_scaling-in' % cluster.name,
+                    cluster_id=cluster_id,
+                    action=event,
+                    type='webhook'
                 )
-                ### 2. receiver
 
-                ### 3. aodh
+            alarm_data = self.create_alarm_data(cluster, receiver_scaling_in, data_scaling_in)
 
-                ## scaling-out
-                ### policy
+            ### 3. aodh
+            self.create_or_update_alarm(conn.auth_token, alarm_data, alarm.get('alarm_id') if alarm else None)
 
-                ### receiver
+            ## scaling-out
+            ### 1. policy
+            event = 'CLUSTER_SCALE_OUT'
+            self.create_scaling_policy(conn, cluster,
+                                       '%s_policy_scaling-out' % cluster.name,
+                                       event, data_scaling_out)
 
-                ### aodh
+            alarm = None
+            receiver_scaling_out = None
 
-                pass
+            ### 2. receiver
+            if cluster_policies:
+                try:
+                    receivers = list(conn.clustering.receivers(cluster_id=cluster_id, action=event))
+
+                    if receivers:
+                        receiver_scaling_out = receivers[0]
+                        alarm = self.get_alarm(conn.auth_token, receiver_scaling_out.id)
+
+                except ResourceNotFound:
+                    pass
+
+            if receiver_scaling_out is None:
+                receiver_scaling_out = conn.clustering.create_receiver(
+                    name='%s_receiver_scaling-out' % cluster.name,
+                    cluster_id=cluster_id,
+                    action=event,
+                    type='webhook'
+                )
+
+            ### 3. aodh
+            alarm_data = self.create_alarm_data(cluster, receiver_scaling_out, data_scaling_out)
+            alarm_data['severity'] = 'critical'
+            self.create_or_update_alarm(conn.auth_token, alarm_data, alarm.get('alarm_id') if alarm else None)
 
         return req_data
 
-# def get_alarm(receiver_id, auth_key):
-#     if not receiver_id:
-#         raise ValueError("receiver_id can't be null")
-#
-#     if not auth_key:
-#         raise ValueError("auth_key can't be null")
-#
-#     url = "http://192.168.15.40:8042/v2/alarms?q.field=name&q.op=eq&q.value=%s" % recevier_id
-#
-#     headers = {
-#         'X-Auth-Token': auth_key
-#     }
-#
-#     response = requests.request("GET", url, headers=headers)
-#
-#     alarm_list = response.json()
-#
-#     if not alarm_list:
-#         return None
-#
-#     return alarm_list[0]
+    def delete(self, cluster_id):
+        pass
 
+    @staticmethod
+    def create_alarm_data(cluster, receiver, data_scaling):
+        threshold = data_scaling['threshold']
 
-def create_alarm(auth_token, data):
-    if not auth_token:
-        raise ValueError("auth_token can't be null")
+        if data_scaling['metric'] == 'cpu':
+            threshold = threshold * 20 * 1000000000
 
-    url = "http://192.168.15.40:8042/v2/alarms"
+        #TODO: metric별 resource_type 매핑이 필요함.
+        return {
+            'alarm_actions': [receiver.channel['alarm_url']],
+            'name': receiver.id,
+            'gnocchi_aggregation_by_resources_threshold_rule': {
+                "evaluation_periods": data_scaling['evaluation_period'],
+                "metric": data_scaling['metric'],
+                "aggregation_method": data_scaling['aggregation_method'],
+                "granularity": "20",
+                "threshold": threshold,
+                'query': '{\"and\":[{\"=\":{\"cluster_id\":\"%s\"}},{\"=\":{\"ended_at\":null}}]}' % cluster.id,
+                'comparison_operator': data_scaling['comparison_op'],
+                "resource_type": "instance"
+            },
+            'repeat_actions': data_scaling['repeat'],
+            'type': 'gnocchi_aggregation_by_resources_threshold'
+        }
 
-    headers = {
-        'X-Auth-Token': auth_token
-    }
+    @staticmethod
+    def create_scaling_policy(conn, cluster, name, event, data):
+        policy = conn.clustering.create_policy(
+            name=name,
+            spec={
+                'type': 'senlin.policy.scaling',
+                'version': 1.0,
+                'properties': {
+                    'adjustment': {
+                        'best_effort': False,
+                        'cooldown': data.get('cooldown', 60),
+                        'min_step': data.get('min_step', 1),
+                        'number': data.get('min_step', 1),
+                        'type': data.get('type', 'CHANGE_IN_CAPACITY')
+                    },
+                    'event': event
+                }
+            }
+        )
 
-    requests.request("POST", url, data=data, headers=headers)
+        conn.clustering.attach_policy_to_cluster(cluster.id, policy.id)
+        return policy
 
-    # return response.json()
+    @staticmethod
+    def get_alarm(auth_token, receiver_id):
+        if not receiver_id:
+            raise ValueError("name can't be null")
 
+        if not auth_token:
+            raise ValueError("auth_key can't be null")
 
-def delete_alarm(auth_token, receiver_id):
-    if not receiver_id:
-        raise ValueError("receiver_id can't be null")
+        url = "http://192.168.15.40:8042/v2/alarms?q.field=name&q.op=eq&q.value=%s" % receiver_id
 
-    if not auth_token:
-        raise ValueError("auth_token can't be null")
+        headers = {
+            'X-Auth-Token': auth_token
+        }
 
-    url = "http://192.168.15.40:8042/v2/alarms/%s" % receiver_id
+        response = requests.request("GET", url, headers=headers)
 
-    headers = {
-        'X-Auth-Token': auth_token
-    }
+        alarm_list = response.json()
 
-    response = requests.request("DELETE", url, headers=headers)
+        return alarm_list[0] if alarm_list else None
+
+    @staticmethod
+    def create_or_update_alarm(auth_token, data, alarm_id=None):
+        if not auth_token:
+            raise ValueError("auth_token can't be null")
+
+        headers = {
+            'Content-Type': 'application/json',
+            'X-Auth-Token': auth_token
+        }
+
+        response = None
+        if alarm_id:
+            url = "http://192.168.15.40:8042/v2/alarms/%s" % alarm_id
+
+            response = requests.request("PUT", url, data=json.dumps(data), headers=headers)
+        else:
+            if not auth_token:
+                raise ValueError("auth_token can't be null")
+
+            url = "http://192.168.15.40:8042/v2/alarms"
+
+            response = requests.request("POST", url, data=json.dumps(data), headers=headers)
+
+        if not 200 <= response.status_code < 300:
+            print("[{url}][{status_code}] {contents}".format(url=response.url, status_code=response.status_code,
+                                                             contents=response.text))
+            raise HttpException("error creating alarm")
+
+    @staticmethod
+    def delete_alarm(auth_token, receiver_id):
+        if not receiver_id:
+            raise ValueError("receiver_id can't be null")
+
+        if not auth_token:
+            raise ValueError("auth_token can't be null")
+
+        url = "http://192.168.15.40:8042/v2/alarms/%s" % receiver_id
+
+        headers = {
+            'X-Auth-Token': auth_token
+        }
+
+        response = requests.request("DELETE", url, headers=headers)
 
