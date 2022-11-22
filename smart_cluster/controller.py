@@ -6,7 +6,8 @@ from flask import current_app, g
 from flask_restx import Namespace, Resource, fields, marshal  # Api 구현을 위한 Api 객체 import
 import openstack
 from openstack.exceptions import ResourceNotFound, HttpException
-from smart_cluster import namespace, pp
+from smart_cluster import namespace, pp, controller_policy, delete_alarm
+from smart_cluster.controller_policy import AutoScalingPolicy
 from smart_cluster.model import model_cluster, model_asp
 
 
@@ -166,11 +167,11 @@ class CreateCluster(Resource):
                 data_lb['provider_network_ip'] = floating_ip.floating_ip_address
 
             except Exception as e:
-                if floating_ip is not None:
-                    conn.delete_floating_ip(floating_ip.id)
-
                 if lb is not None:
                     conn.load_balancer.delete_load_balancer(lb, cascade=True)
+
+                if floating_ip is not None:
+                    conn.delete_floating_ip(floating_ip.id)
 
                 if server_group is not None:
                     conn.compute.delete_server_group(server_group)
@@ -430,7 +431,7 @@ class Cluster(Resource):
 
                 action_info = conn.clustering.detach_policy_from_cluster(cluster, cluster_policy.policy_id)
 
-                if action_info and action_info in 'action':
+                if action_info and 'action' in action_info:
                     action = conn.clustering.get_action(action_info['action'])
                     conn.clustering.wait_for_status(action, 'SUCCEEDED')
 
@@ -438,10 +439,10 @@ class Cluster(Resource):
 
             # 클러스터 > 리시버 삭제
             for receiver in conn.clustering.receivers(cluster_id=cluster_id):
+                delete_alarm(conn.auth_token, receiver.id)
+
                 conn.clustering.delete_receiver(receiver)
                 conn.clustering.wait_for_delete(receiver)
-
-                self.delete_alarm(conn.auth_token, receiver.id)
 
             # 클러스터 및 프로파일 삭제
             profile = conn.get_cluster_profile(cluster.profile_id)
