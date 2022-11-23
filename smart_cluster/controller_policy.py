@@ -111,7 +111,7 @@ class AutoScalingPolicy(Resource):
 
                     if receivers:
                         receiver_scaling_in = receivers[0]
-                        alarm = self.__get_alarm(conn.auth_token, receiver_scaling_in.id)
+                        alarm = get_alarm(conn.auth_token, receiver_scaling_in.id)
 
                 except ResourceNotFound:
                     pass
@@ -146,7 +146,7 @@ class AutoScalingPolicy(Resource):
 
                     if receivers:
                         receiver_scaling_out = receivers[0]
-                        alarm = self.__get_alarm(conn.auth_token, receiver_scaling_out.id)
+                        alarm = get_alarm(conn.auth_token, receiver_scaling_out.id)
 
                 except ResourceNotFound:
                     pass
