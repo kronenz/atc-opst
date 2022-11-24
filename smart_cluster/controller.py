@@ -101,7 +101,7 @@ class CreateCluster(Resource):
                 # 서버 그룹 생성
                 server_group = conn.compute.create_server_group(
                     name='%s_sg' % cluster_name,
-                    policy='soft-anti-affinity'
+                    policies=['soft-anti-affinity']
                 )
 
                 # 클러스터 > 프로파일 생성
@@ -159,6 +159,25 @@ class CreateCluster(Resource):
                 conn.clustering.wait_for_status(cluster, 'ACTIVE')
 
                 conn.clustering.attach_policy_to_cluster(cluster.id, policy_lb.id)
+
+                # policy_affinity = conn.clustering.create_policy(
+                #     name='%s_policy_affinity' % cluster_name,
+                #     spec={
+                #         'type': 'senlin.policy.affinity',
+                #         'version': 1.0,
+                #         'properties': {
+                #             'servergroup': {
+                #                 'name': server_group.name,
+                #                 'policies': 'soft-anti-affinity',
+                #             },
+                #             'availability_zone': 'nova'
+                #         }
+                #     }
+                # )
+                #
+                # conn.clustering.wait_for_status(cluster, 'ACTIVE')
+                #
+                # conn.clustering.attach_policy_to_cluster(cluster.id, policy_affinity.id)
 
                 req_data['id'] = cluster.id
                 data_cluster_profile['id'] = profile.id

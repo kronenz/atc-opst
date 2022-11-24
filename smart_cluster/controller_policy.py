@@ -25,8 +25,10 @@ class AutoScalingPolicy(Resource):
                 user_domain_name="default",
                 project_domain_name="default",
         ) as conn:
+            cluster_id = cluster_id.strip()
 
             try:
+                cluster = conn.clustering.get_cluster(cluster_id)
                 cluster_policies = list(
                     conn.clustering.cluster_policies(cluster_id, policy_type='senlin.policy.scaling-1.0'))
             except ResourceNotFound:
@@ -44,19 +46,21 @@ class AutoScalingPolicy(Resource):
             if not cluster_policies:
                 return '', 404
 
+            vcpus = self.__get_vcpus(conn, cluster.profile_id)
+
             #scaling-in
             event = 'CLUSTER_SCALE_IN'
 
             policy = next((p for p in policies if p.spec['properties']['event'] == event), None)
 
-            resp_data['scaling_in'] = AutoScalingPolicy.__get_scaling_policy(conn, cluster_id, policy, event)
+            resp_data['scaling_in'] = self.__get_scaling_policy(conn, cluster_id, policy, event, vcpus=vcpus)
 
             #scaling-out
             event = 'CLUSTER_SCALE_OUT'
 
             policy = next((p for p in policies if p.spec['properties']['event'] == event), None)
 
-            resp_data['scaling_out'] = AutoScalingPolicy.__get_scaling_policy(conn, cluster_id, policy, event)
+            resp_data['scaling_out'] = self.__get_scaling_policy(conn, cluster_id, policy, event, vcpus=vcpus)
 
             return resp_data
 
@@ -77,6 +81,8 @@ class AutoScalingPolicy(Resource):
         ) as conn:
             cluster = None
 
+            cluster_id = cluster_id.strip()
+
             try:
                 cluster = conn.clustering.get_cluster(cluster_id)
             except ResourceNotFound:
@@ -93,6 +99,8 @@ class AutoScalingPolicy(Resource):
                     conn.clustering.wait_for_status(action, 'SUCCEEDED')
 
                 conn.clustering.delete_policy(cp.policy_id)
+
+            vcpus = self.__get_vcpus(conn, cluster.profile_id)
 
             ## scaling-in
             ### 1. policy
@@ -124,7 +132,7 @@ class AutoScalingPolicy(Resource):
                     type='webhook'
                 )
 
-            alarm_data = self.__create_alarm_data(cluster, receiver_scaling_in, data_scaling_in)
+            alarm_data = self.__create_alarm_data(cluster, receiver_scaling_in, data_scaling_in, vcpus=vcpus)
 
             ### 3. aodh
             create_or_update_alarm(conn.auth_token, alarm_data, alarm.get('alarm_id') if alarm else None)
@@ -160,7 +168,7 @@ class AutoScalingPolicy(Resource):
                 )
 
             ### 3. aodh
-            alarm_data = self.__create_alarm_data(cluster, receiver_scaling_out, data_scaling_out)
+            alarm_data = self.__create_alarm_data(cluster, receiver_scaling_out, data_scaling_out, vcpus=vcpus)
             alarm_data['severity'] = 'critical'
             create_or_update_alarm(conn.auth_token, alarm_data, alarm.get('alarm_id') if alarm else None)
 
@@ -176,6 +184,8 @@ class AutoScalingPolicy(Resource):
                 user_domain_name="default",
                 project_domain_name="default",
         ) as conn:
+            cluster_id = cluster_id.strip()
+
             try:
                 cluster = conn.clustering.get_cluster(cluster_id)
             except ResourceNotFound:
@@ -216,11 +226,11 @@ class AutoScalingPolicy(Resource):
             return None, 204
 
     @staticmethod
-    def __create_alarm_data(cluster, receiver, data_scaling):
+    def __create_alarm_data(cluster, receiver, data_scaling, vcpus=1):
         threshold = data_scaling['threshold']
 
         if data_scaling['metric'] == 'cpu':
-            threshold = threshold * 20 * 1000000000 / 100
+            threshold = threshold * 20 * 1000000000 * vcpus / 100
 
         # TODO: metric별 resource_type 매핑이 필요함.
         return {
@@ -264,7 +274,7 @@ class AutoScalingPolicy(Resource):
         return policy
 
     @staticmethod
-    def __get_scaling_policy(conn, cluster_id, policy, event):
+    def __get_scaling_policy(conn, cluster_id, policy, event, vcpus=1):
         data_scaling = {}
 
         if not policy:
@@ -292,7 +302,7 @@ class AutoScalingPolicy(Resource):
             data_scaling['aggregation_method'] = rule['aggregation_method']
 
             if rule['metric'] == 'cpu':
-                data_scaling['threshold'] = rule['threshold'] / 20 / 1000000000 * 100
+                data_scaling['threshold'] = rule['threshold'] / 20 / 1000000000 / vcpus * 100
             else:
                 data_scaling['threshold'] = rule['threshold']
 
@@ -301,3 +311,13 @@ class AutoScalingPolicy(Resource):
             data_scaling['repeat'] = alarm['repeat_actions']
 
             return data_scaling
+
+    @staticmethod
+    def __get_vcpus(conn, profile_id):
+        profile = conn.clustering.get_profile(profile_id)
+
+        flavor_name = profile['spec']['properties']['flavor']
+
+        flavor = conn.get_flavor(flavor_name)
+
+        return flavor.vcpus
