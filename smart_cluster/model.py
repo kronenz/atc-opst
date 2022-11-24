@@ -2,7 +2,7 @@ from flask_restx import fields # Api 구현을 위한 Api 객체 import
 from smart_cluster import namespace
 
 model_cluster_profile = namespace.model('Cluster_cluster_profile', {
-        'id': fields.String(description='프로파일 식별자'),
+        'id': fields.String(description='프로파일 식별자 (생성시 생략)'),
         'name': fields.String(description='인스턴스 명칭', required=True),
         'flavor': fields.String(description="프로파일 Flavor's Name", required=True, example='m1.small'),
         'image': fields.String(description="프로파일 Image's Id", required=True),
@@ -44,8 +44,8 @@ model_lb_hm = namespace.model('Cluster_lb_hm', {
     })
 
 model_lb = namespace.model('Cluster_lb', {
-        'id': fields.String(description="로드밸런서 식별자", requried=False),
-        'pool_id': fields.String(description="Pool 식별자", required=False),
+        'id': fields.String(description="로드밸런서 식별자 (생성시 생략)", requried=False),
+        'pool_id': fields.String(description="Pool 식별자 (생성시 생략)", required=False),
         # openstack floating ip create --floating-ip-address 192.168.53.151 --project vm-autoscaling provider
         'provider_network_id': fields.String(description="Provider Network ID", required=True),
         'provider_subnet_id': fields.String(description="Provider Network Subnet ID", required=True),
@@ -63,7 +63,7 @@ model_lb = namespace.model('Cluster_lb', {
     }, description="Load Balancer 정보")
 
 model_cluster = namespace.model('Cluster', {
-    'id': fields.String(description="클러스터 식별자", required=False),
+    'id': fields.String(description="클러스터 식별자 (생성시 생략)", required=False),
     'name': fields.String(description="클러스터 명칭", required=True),
     # 'description': fields.String(description="클러스터 설명", required=False),
     'project_id': fields.String(description="클러스터를 생성할 프로젝트 ID", required=True),
@@ -89,7 +89,7 @@ model_asp_scaling = namespace.model('AutoScalingPolicy_Scaling', {
 })
 
 model_asp = namespace.model('AutoScalingPolicy', {
-    'id': fields.String(description="클러스터 식별자", required=True),
+    'id': fields.String(description="클러스터 식별자 (생성/수정시 생략)", required=False),
     'scaling_in': fields.Nested(model_asp_scaling, required=True),
     'scaling_out': fields.Nested(model_asp_scaling, required=True)
 })
