@@ -5,6 +5,7 @@ import openstack
 import requests
 from flask import request  # 서버 구현을 위한 Flask 객체 import
 from flask_restx import Resource  # Api 구현을 위한 Api 객체 import
+from openstack.clustering.v1.policy import Policy
 from openstack.exceptions import ResourceNotFound, HttpException
 
 from smart_cluster import namespace, get_alarm, create_or_update_alarm, delete_alarm
@@ -48,14 +49,14 @@ class AutoScalingPolicy(Resource):
 
             vcpus = self.__get_vcpus(conn, cluster.profile_id)
 
-            #scaling-in
+            # scaling-in
             event = 'CLUSTER_SCALE_IN'
 
             policy = next((p for p in policies if p.spec['properties']['event'] == event), None)
 
             resp_data['scaling_in'] = self.__get_scaling_policy(conn, cluster_id, policy, event, vcpus=vcpus)
 
-            #scaling-out
+            # scaling-out
             event = 'CLUSTER_SCALE_OUT'
 
             policy = next((p for p in policies if p.spec['properties']['event'] == event), None)
@@ -88,17 +89,7 @@ class AutoScalingPolicy(Resource):
             except ResourceNotFound:
                 return '', 404
 
-            cluster_policies = list(
-                conn.clustering.cluster_policies(cluster_id, policy_type='senlin.policy.scaling-1.0'))
-
-            for cp in cluster_policies:
-                action_info = conn.clustering.detach_policy_from_cluster(cluster, cp.policy_id)
-
-                if action_info and 'action' in action_info:
-                    action = conn.clustering.get_action(action_info['action'])
-                    conn.clustering.wait_for_status(action, 'SUCCEEDED')
-
-                conn.clustering.delete_policy(cp.policy_id)
+            cluster_policies = self.__delete_scaling_policy(conn, cluster)
 
             vcpus = self.__get_vcpus(conn, cluster.profile_id)
 
@@ -106,7 +97,7 @@ class AutoScalingPolicy(Resource):
             ### 1. policy
             event = 'CLUSTER_SCALE_IN'
             self.__create_scaling_policy(conn, cluster,
-                                       '%s_policy_scaling-in' % cluster.name,
+                                         '%s_policy_scaling-in' % cluster.name,
                                          event, data_scaling_in)
 
             alarm = None
@@ -141,7 +132,7 @@ class AutoScalingPolicy(Resource):
             ### 1. policy
             event = 'CLUSTER_SCALE_OUT'
             self.__create_scaling_policy(conn, cluster,
-                                       '%s_policy_scaling-out' % cluster.name,
+                                         '%s_policy_scaling-out' % cluster.name,
                                          event, data_scaling_out)
 
             alarm = None
@@ -191,17 +182,7 @@ class AutoScalingPolicy(Resource):
             except ResourceNotFound:
                 return '', 404
 
-            cluster_policies = list(
-                conn.clustering.cluster_policies(cluster_id, policy_type='senlin.policy.scaling-1.0'))
-
-            for cp in cluster_policies:
-                action_info = conn.clustering.detach_policy_from_cluster(cluster, cp.policy_id)
-
-                if action_info and 'action' in action_info:
-                    action = conn.clustering.get_action(action_info['action'])
-                    conn.clustering.wait_for_status(action, 'SUCCEEDED')
-
-                conn.clustering.delete_policy(cp.policy_id)
+            cluster_policies = self.__delete_scaling_policy(conn, cluster)
 
             event = 'CLUSTER_SCALE_IN'
             receivers = list(conn.clustering.receivers(cluster_id=cluster_id, action=event))
@@ -212,7 +193,6 @@ class AutoScalingPolicy(Resource):
                 conn.clustering.delete_receiver(receiver)
                 conn.clustering.wait_for_delete(receiver)
 
-
             event = 'CLUSTER_SCALE_OUT'
             receivers = list(conn.clustering.receivers(cluster_id=cluster_id, action=event))
 
@@ -222,8 +202,27 @@ class AutoScalingPolicy(Resource):
                 conn.clustering.delete_receiver(receiver)
                 conn.clustering.wait_for_delete(receiver)
 
+            for cp in cluster_policies:
+                conn.clustering.delete_policy(cp.policy_id)
 
             return None, 204
+
+    @staticmethod
+    def __delete_scaling_policy(conn, cluster):
+        cluster_id = cluster.id
+
+        cluster_policies = list(
+            conn.clustering.cluster_policies(cluster_id, policy_type='senlin.policy.scaling-1.0'))
+        for cp in cluster_policies:
+            action_info = conn.clustering.detach_policy_from_cluster(cluster, cp.policy_id)
+
+            if action_info and 'action' in action_info:
+                action = conn.clustering.get_action(action_info['action'])
+                conn.clustering.wait_for_status(action, 'SUCCEEDED')
+
+            conn.clustering.wait_for_status(cluster, 'ACTIVE')
+            conn.clustering.delete_policy(cp.policy_id)
+        return cluster_policies
 
     @staticmethod
     def __create_alarm_data(cluster, receiver, data_scaling, vcpus=1):
